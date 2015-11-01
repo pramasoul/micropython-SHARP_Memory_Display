@@ -1,28 +1,65 @@
-# FIXME: VCOM switching 
+# The MIT License (MIT)
+#
+# Copyright (c) 2015 Tom Soulanille
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+# THE SOFTWARE.
 
 
 from pyb import Pin, SPI, udelay, rng, Timer
+import pyb                      # DEBUG
+
+class HardwareVCOM:
+    def __init__(self):
+        # VCOM must alternate at 0.5Hz to 30Hz to prevent damage to
+        # the LCD We use a hardware timer to make it more resistant to
+        # software failure. Once the timer is set up and driving the
+        # EXTCOMIN input to the display, we have the necessary
+        # hardware signal even if the code crashes (as long as we
+        # don't cause a deinit of the timer).  As written this uses
+        # timer 11, and pin Y4. We send the "Frame Inversion Flag",
+        # aka VCOM, in every serial transmission, so you can also
+        # maintain the necessary alternation of VCOM without
+        # connecting EXTCOMIN, as long as you sync() the display at
+        # least once every period of the timer (every 500ms as
+        # written), and don't crash.
+        self.vcom = 2
+        def toggle_vcom(l):
+            self.vcom ^= 2
+            pyb.LED(2).toggle() # DEBUG
+        self.timer = t = Timer(11)
+        # drive the hardware EXTCOMIN (terminal 4 on display):
+        self.timer_ch = t.channel(1, Timer.OC_TOGGLE, pin=Pin.board.Y4)
+        t.callback(toggle_vcom) # For if we don't use hardware VCOM
+        t.init(freq=2)          # with OC_TOGGLE results in output at 1Hz
+
+
+_hw_vcom = HardwareVCOM()       # Create the singleton immediately
+def get_vcom():
+    global _hw_vcom
+    return _hw_vcom.vcom
+
 
 class SharpMemDisplay:
     def __init__(self, chan, cs, xdim, ydim):
         self.spi = SPI(chan, SPI.MASTER, baudrate=1000000, polarity=0, phase=0, firstbit=SPI.LSB)
         self.xdim = xdim
         self.ydim = ydim
-
-        # VCOM must alternate at 0.5Hz to 30Hz to prevent damage to the LCD
-        # We use a hardware timer to make it more resistant to software failure
-        # As written this uses timer 11, and pin Y4. We send the "Frame Inversion Flag",
-        # aka VCOM, in every serial transmission
-        self.vcom = 2
-        def toggle_vcom(l):
-            self.vcom ^= 2
-        self.timer = t = Timer(11)
-        self.timer_ch = t.channel(1, Timer.OC_TOGGLE)
-        # To drive EXTCOMIN (terminal 4) on display:
-        self.extcom = Pin(Pin.board.Y4, mode=Pin.AF_PP, af=Pin.AF3_TIM11)
-        t.callback(toggle_vcom) # For if we don't use hardware VCOM
-        t.init(freq=2)          # with OC_TOGGLE results in output at 1Hz
-
         if not isinstance(cs, Pin):
             cs = Pin(cs)
         cs.value(0)
@@ -69,33 +106,27 @@ class SharpMemDisplay:
         usleep = self.usleep
         send = self.spi.send
         set_cs = self.cs.value
-        vcom = self.vcom
+        vcom = get_vcom()
         syncing = True
         while syncing:
+            set_cs(1)
+            usleep(6)          # tsSCS
             try:
                 ix = changed.pop()
             except KeyError:
                 syncing = False
+                send(0 | vcom)
             else:
-                set_cs(1)
-                usleep(6)          # tsSCS
                 send(1 | vcom)
                 send(ix+1)
                 send(lines[ix])
-                send(0)
-                usleep(2)          # thSCS
-                set_cs(0)
-                usleep(2)          # thSCSL
-
-    def setup_hardware_vcom(self):
-        def toggle_vcom(l):
-            self.vcom ^= 2
-        self.timer = t = Timer(11)
-        self.timer_ch = t.channel(1, Timer.OC_TOGGLE, pin=Pin.board.Y4)
-        t.callback(toggle_vcom) # For if we don't use hardware VCOM
-        t.init(freq=2)          # with OC_TOGGLE results in output at 1Hz
+            send(0)
+            usleep(2)          # thSCS
+            set_cs(0)
+            usleep(2)          # thSCSL
 
 
+# A little demo: Brownian motion.
 def brown(screen):
     screen.clear()
     xdim = screen.xdim
